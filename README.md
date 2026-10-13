@@ -130,6 +130,12 @@ cost real time to find.
 The result is ~86 MB, `com.termux` versionCode 118, minSdk 21, targetSdk 28,
 signed with termux-app's own debug keystore, for arm64-v8a and armeabi-v7a.
 
+**The APK is content-reproducible but not byte-reproducible.** Two builds from
+the same sources have the same entry set and byte-identical content in every
+entry; they differ only in the timestamps d8 and apksigner stamp into seven
+files, which changes the SHA-256. Compare the contents, not the hash, when
+checking that two builds match.
+
 **No part of this has been installed or run on a device.** The structural
 checks confirm the APK contains what it should. They do not check that the app
 starts, that the bootstrap unpacks, or that `gh` runs.

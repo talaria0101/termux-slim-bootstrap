@@ -175,6 +175,19 @@ test passes for the wrong reason and would keep passing if the real check were
 deleted. The `targetSdk` case is rebuilt and re-signed properly for the same
 reason.
 
+## Reproducibility
+
+Content-reproducible, not byte-reproducible. Two builds from the same sources
+produce the same entry set and byte-identical content in every entry. They
+differ in seven timestamps that `d8` and `apksigner` stamp into their output,
+which changes the SHA-256. Verified by building twice and diffing entry by
+entry: 0 entries with differing content, 7 with differing timestamps
+(`classes.dex`, `classes2.dex`, and the five `META-INF` signature files).
+
+Forcing timestamps on `jar` does not help, because the ones that matter are
+written by the dexer and the signer. `SOURCE_DATE_EPOCH` is the usual lever and
+has not been tried here.
+
 ## Not verified
 
 No part of this has been installed or run on a device or emulator. Nothing here
