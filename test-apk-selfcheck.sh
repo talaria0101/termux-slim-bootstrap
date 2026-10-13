@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Prove test-apk.py actually fails when the APK is wrong.
 #
+# Run build-apk.sh first. The targetSdk case needs its intermediate artifacts
+# (compiled resources, the linked manifest, the dex list) and skips without
+# them rather than passing vacuously.
+#
 # A structural suite that has only ever seen a good artifact proves nothing: it
 # would pass just as happily against a broken one if the checks were vacuous.
 # This plants defects, one at a time, in a copy of the real APK and requires
@@ -135,6 +139,69 @@ EOF
 )"
 expect_catch "missing arm64 lib" "$bad" "native library for both ABIs"
 
+# The defect that would matter most in the field: a bootstrap that installed
+# cleanly but had no gh in it. The zip is rewritten without bin/gh, the .so is
+# reassembled around it, and the whole APK is re-aligned and re-signed so the
+# signature and every other check still pass. Only the gh check can catch this.
+bad="$(plant no-gh <<'EOF'
+import sys, zipfile, io, os
+src, dst = sys.argv[1], sys.argv[2]
+entry = "lib/arm64-v8a/libtermux-bootstrap.so"
+with zipfile.ZipFile(src) as z:
+    so = bytearray(z.read(entry))
+    with zipfile.ZipFile(src) as z2:
+        infos = z2.infolist()
+        payloads = {i.filename: z2.read(i.filename) for i in infos}
+
+start = bytes(so).find(b"PK\x03\x04")
+eocd = bytes(so).rfind(b"PK\x05\x06")
+inner = bytes(so[start:eocd + 22])
+bz = zipfile.ZipFile(io.BytesIO(inner))
+out = io.BytesIO()
+with zipfile.ZipFile(out, "w") as o:
+    for n in bz.namelist():
+        if n == "bin/gh":
+            continue
+        o.writestr(bz.getinfo(n), bz.read(n))
+payloads[entry] = bytes(so[:start]) + out.getvalue() + bytes(so[eocd + 22:])
+
+with zipfile.ZipFile(dst, "w") as o:
+    for i in infos:
+        zi = zipfile.ZipInfo(i.filename, date_time=i.date_time)
+        zi.compress_type = i.compress_type
+        o.writestr(zi, payloads[i.filename])
+EOF
+)"
+# Re-align and re-sign the planted APK. Rewriting the archive breaks the
+# signature, so without this the case would be caught by the wrong check.
+#
+# zipalign refuses identical input and output paths ("Input and output can't be
+# same file"), so the aligned copy is a separate file and is what gets signed.
+resign() {
+	local bad="$1"
+	local aligned="$bad.aligned" signed="$bad.signed"
+	"$BT/zipalign" -f -p 4 "$bad" "$aligned" >/dev/null 2>&1 || return 1
+	"$BT/apksigner" sign --ks "$GRADLE_APP/app/testkey_untrusted.jks" \
+		--ks-key-alias "$ks_alias" --ks-pass "pass:$ks_pass" \
+		--key-pass "pass:$ks_pass" --min-sdk-version 21 \
+		--out "$signed" "$aligned" >/dev/null 2>&1 || return 1
+	mv -f "$signed" "$bad"
+}
+
+BT="${BUILD_TOOLS:-/workspace/android-sdk/build-tools/36.0.0}"
+GRADLE_APP="${APP_DIR:-/workspace/termux-app}"
+ks_pass="$(sed -n "s/^[[:space:]]*keyPassword[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" \
+	"$GRADLE_APP/app/build.gradle" | tail -1)"
+ks_alias="$(sed -n "s/^[[:space:]]*keyAlias[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" \
+	"$GRADLE_APP/app/build.gradle" | tail -1)"
+
+if resign "$bad"; then
+	expect_catch "no gh in bootstrap" "$bad" "has bin/gh"
+else
+	printf '  FAIL  %-22s could not re-sign the planted APK\n' "no gh in bootstrap"
+	fails=$((fails + 1))
+fi
+
 # The targetSdkVersion case is built the honest way: re-link the resources with
 # a different --target-sdk-version, re-merge, re-align and re-sign. Anything
 # cheaper would corrupt the signature and trip the wrong check, which is exactly
@@ -150,9 +217,7 @@ printf '\nspecial case: wrong targetSdkVersion, rebuilt and re-signed properly\n
 TS="${TMPDIR:-/tmp}/termux-selfcheck-targetsdk.$$"
 mkdir -p "$TS"
 trap 'rm -rf "$PLANTED" "$TS"' EXIT
-BT="${BUILD_TOOLS:-/workspace/android-sdk/build-tools/36.0.0}"
 SDK="${ANDROID_SDK_ROOT:-/workspace/android-sdk}"
-GRADLE_APP="${APP_DIR:-/workspace/termux-app}"
 WORK="${WORK_DIR:-$HERE/apk-work}"
 
 if [ -d "$WORK/res" ] && [ -f "$WORK/AndroidManifest.xml" ] && [ -f "$WORK/flats-order.txt" ]; then
@@ -167,14 +232,6 @@ if [ -d "$WORK/res" ] && [ -f "$WORK/AndroidManifest.xml" ] && [ -f "$WORK/flats
 		python3 "$HERE/merge-libs.py" "$TS/base.apk" "$WORK/apk/lib" \
 			--dex-list "$WORK/dexfiles.txt" >/dev/null
 		"$BT/zipalign" -f -p 4 "$TS/base.apk" "$TS/al.apk"
-		ks_pass="$(sed -n "s/^[[:space:]]*keyPassword[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" \
-			"$GRADLE_APP/app/build.gradle" | tail -1)"
-		ks_alias="$(sed -n "s/^[[:space:]]*keyAlias[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" \
-			"$GRADLE_APP/app/build.gradle" | tail -1)"
-		if [ -z "$ks_alias" ] || [ -z "$ks_pass" ]; then
-			printf '  FAIL  %-22s could not read the key alias or password\n' "targetSdk 33"
-			fails=$((fails + 1))
-		fi
 		if "$BT/apksigner" sign --ks "$GRADLE_APP/app/testkey_untrusted.jks" \
 			--ks-key-alias "$ks_alias" --ks-pass "pass:$ks_pass" \
 			--key-pass "pass:$ks_pass" --min-sdk-version 21 \
