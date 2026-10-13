@@ -114,6 +114,26 @@ the trailing slash from directory entries each turn the suite red.
 | `test-plan.sh` | guards on the plan |
 | `test-bootstrap.sh` | guards on the built archive |
 
+## Building the APK
+
+`build-apk.sh` wraps the slim bootstrap in a real Termux APK, so a fresh
+install already has `gh` and `ssh` with no `pkg install`. It drives the SDK
+tools directly because Gradle cannot run here (it forks a daemon that needs a
+socket bind, and every bind is denied). See [APK-BUILD.md](APK-BUILD.md) for
+the requirements and for the things that are easy to get wrong, each of which
+cost real time to find.
+
+    bash build-apk.sh                        # -> apk/termux-app_apt-android-7-debug.apk
+    python3 test-apk.py apk/termux-app_apt-android-7-debug.apk
+    bash test-apk-selfcheck.sh
+
+The result is ~86 MB, `com.termux` versionCode 118, minSdk 21, targetSdk 28,
+signed with termux-app's own debug keystore, for arm64-v8a and armeabi-v7a.
+
+**No part of this has been installed or run on a device.** The structural
+checks confirm the APK contains what it should. They do not check that the app
+starts, that the bootstrap unpacks, or that `gh` runs.
+
 ## Format notes that are easy to get wrong
 
 These cost real debugging time and are recorded so they are not rediscovered:
