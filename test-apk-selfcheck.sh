@@ -216,7 +216,7 @@ printf '\nspecial case: wrong targetSdkVersion, rebuilt and re-signed properly\n
 # intermediate artifacts have to survive until the final check reads them.
 TS="${TMPDIR:-/tmp}/termux-selfcheck-targetsdk.$$"
 mkdir -p "$TS"
-trap 'rm -rf "$PLANTED" "$TS"' EXIT
+trap 'rm -rf "$PLANTED" "$TS" "$NOR"' EXIT
 SDK="${ANDROID_SDK_ROOT:-/workspace/android-sdk}"
 WORK="${WORK_DIR:-$HERE/apk-work}"
 
@@ -262,6 +262,65 @@ if [ -d "$WORK/res" ] && [ -f "$WORK/AndroidManifest.xml" ] && [ -f "$WORK/flats
 	fi
 else
 	printf '  SKIP  %-22s build-apk.sh has not been run (%s missing)\n' "targetSdk 33" "$WORK"
+fi
+
+# The R-class defect: every library R class stripped from the dex. This is the
+# pre-fix APK. Published AARs do not ship R, so library bytecode references
+# e.g. androidx.cardview.R$attr through a real getstatic, and the loader throws
+# NoClassDefFoundError on first use. Rebuilt here from the real dex rather than
+# approximated, so the case cannot pass by tripping an unrelated check.
+printf '\nspecial case: every library R class stripped from the dex\n'
+NOR="${TMPDIR:-/tmp}/termux-selfcheck-nor.$$"
+rm -rf "$NOR"
+mkdir -p "$NOR"
+trap 'rm -rf "$PLANTED" "$TS" "$NOR"' EXIT
+
+if [ -d "$WORK/dexinput" ] && [ -f "$WORK/dexfiles.txt" ]; then
+	cp -a "$WORK/dexinput" "$NOR/dexinput"
+	before="$(find "$NOR/dexinput" -path '*/androidx/*' -name 'R*.class' | wc -l)"
+	find "$NOR/dexinput/androidx" -name 'R*.class' -delete 2>/dev/null
+	after="$(find "$NOR/dexinput" -path '*/androidx/*' -name 'R*.class' | wc -l)"
+	if [ "$before" -eq 0 ] || [ "$after" -ne 0 ]; then
+		printf '  FAIL  %-22s could not strip the library R classes (%s -> %s)\n' \
+			"no library R" "$before" "$after"
+		fails=$((fails + 1))
+	else
+		(cd "$NOR/dexinput" && "$JAVA_HOME/bin/jar" --create --file "$NOR/in.jar" .)
+		mkdir -p "$NOR/dex"
+		"$BT/d8" --release --min-api 21 \
+			--lib "$SDK/platforms/android-36/android.jar" \
+			--lib "$WORK/stub/classes" \
+			--lib "$WORK/dl/desugar_jdk_libs.jar" \
+			--output "$NOR/dex" "$NOR/in.jar" >/dev/null 2>&1
+		ls "$NOR"/dex/*.dex > "$NOR/dexlist.txt" 2>/dev/null
+		flats=()
+		while read -r f; do flats+=(-R "$f"); done <"$WORK/flats-order.txt"
+		"$BT/aapt2" link -I "$SDK/platforms/android-36/android.jar" \
+			--manifest "$WORK/AndroidManifest.xml" \
+			--min-sdk-version 21 --target-sdk-version 28 \
+			--version-code 118 --version-name 0.118.0 --auto-add-overlay \
+			-o "$NOR/base.apk" "${flats[@]}" 2>/dev/null
+		if [ -s "$NOR/base.apk" ] && [ -s "$NOR/dexlist.txt" ]; then
+			python3 "$HERE/merge-libs.py" "$NOR/base.apk" "$WORK/apk/lib" \
+				--dex-list "$NOR/dexlist.txt" >/dev/null
+			"$BT/zipalign" -f -p 4 "$NOR/base.apk" "$NOR/al.apk" >/dev/null 2>&1
+			if "$BT/apksigner" sign --ks "$GRADLE_APP/app/testkey_untrusted.jks" \
+				--ks-key-alias "$ks_alias" --ks-pass "pass:$ks_pass" \
+				--key-pass "pass:$ks_pass" --min-sdk-version 21 \
+				--out "$NOR/bad.apk" "$NOR/al.apk" >/dev/null 2>&1; then
+				expect_catch "no library R" "$NOR/bad.apk" \
+					"every referenced library R class is present"
+			else
+				printf '  FAIL  %-22s could not re-sign\n' "no library R"
+				fails=$((fails + 1))
+			fi
+		else
+			printf '  FAIL  %-22s could not rebuild the stripped APK\n' "no library R"
+			fails=$((fails + 1))
+		fi
+	fi
+else
+	printf '  SKIP  %-22s %s/dexinput missing; build-apk.sh first\n' "no library R" "$WORK"
 fi
 
 printf '\n'

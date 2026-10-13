@@ -128,6 +128,45 @@ def main():
         check("dex carries com/termux/app", b"Lcom/termux/app/" in blob)
         check("dex carries com/termux/shared", b"Lcom/termux/shared/" in blob)
 
+    # --- every referenced R class is present ------------------------------
+    #
+    # This catches the worst bug found so far. Published AARs do not ship an R
+    # class, because R is generated per application rather than per library. So
+    # library bytecode reaches its own R through a real getstatic, e.g.
+    # androidx.cardview.R$attr.cardViewStyle, and if that class is absent the
+    # loader throws NoClassDefFoundError the first time a CardView is inflated.
+    #
+    # An earlier build generated R for only 4 namespaces and shipped 4. The
+    # official Termux v0.118.3 arm64 APK ships 46. Verified by listing the class
+    # descriptors of both dex sets.
+    #
+    # dexdump is the authority for both halves of this. A raw byte scan cannot
+    # tell a class definition from a reference, because the descriptor pool
+    # holds both in the same form.
+    defined = set()
+    referenced = set()
+    # dexdump writes bytes that are not valid UTF-8 (it dumps string data
+    # verbatim), so the output is decoded as latin-1, which never fails and
+    # leaves the ASCII class names intact.
+    r = subprocess.run(
+        [os.path.join(bt, "dexdump"), apk, "-d"],
+        capture_output=True, env=env)
+    out = (r.stdout or b"").decode("latin-1")
+    check("dexdump could read the dex", r.returncode == 0 and bool(out),
+          "" if out else "dexdump produced no output")
+    for line in out.splitlines():
+        m = re.search(r"Class descriptor\s*:\s*'L([^']+);'", line)
+        if m:
+            defined.add(m.group(1))
+    # Every R descriptor that appears as a field owner in the disassembly must
+    # also be a defined class.
+    for m in re.finditer(r"L(androidx/[A-Za-z0-9_/]+R\$[a-z]+);", out):
+        referenced.add(m.group(1))
+    missing_r = sorted(referenced - defined)
+    check("every referenced library R class is present", not missing_r,
+          ", ".join(missing_r[:6]) if missing_r
+          else "%d referenced, %d defined" % (len(referenced), len(defined)))
+
     # --- resources -------------------------------------------------------
     check("resources.arsc present", "resources.arsc" in names)
     if "resources.arsc" in names:
