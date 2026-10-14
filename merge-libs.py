@@ -53,21 +53,38 @@ def dex_entry_name(path):
 
 def main():
     if len(sys.argv) < 3:
-        sys.stderr.write("usage: merge-libs.py <apk> <libdir> [--dex-list FILE]\n")
+        sys.stderr.write(
+            "usage: merge-libs.py <apk> <libdir> [--dex-list FILE] [--abi ABI]\n")
         return 2
     apk, libdir = sys.argv[1], sys.argv[2]
 
     dex_list = None
+    only_abi = None
     rest = sys.argv[3:]
-    if rest:
-        if rest[0] != "--dex-list" or len(rest) < 2:
-            sys.stderr.write("error: expected --dex-list FILE\n")
+    while rest:
+        if rest[0] == "--dex-list":
+            if len(rest) < 2:
+                sys.stderr.write("error: --dex-list needs a file\n")
+                return 2
+            dex_list = rest[1]
+            rest = rest[2:]
+        elif rest[0] == "--abi":
+            if len(rest) < 2:
+                sys.stderr.write("error: --abi needs a value\n")
+                return 2
+            only_abi = rest[1]
+            rest = rest[2:]
+        else:
+            sys.stderr.write("error: unexpected argument %r\n" % rest[0])
             return 2
-        dex_list = rest[1]
-        rest = rest[2:]
-    if rest:
-        sys.stderr.write("error: unexpected argument %r\n" % rest[0])
-        return 2
+
+    if only_abi is not None and not os.path.isdir(os.path.join(libdir, only_abi)):
+        # A per-ABI APK carries exactly one lib/<abi>/ directory. Merging both
+        # into a split APK would leave a device to carry the other ABI's 40MB
+        # bootstrap for nothing, which is the entire point of splitting.
+        sys.stderr.write("error: no native library for %s under %s\n"
+                         % (only_abi, libdir))
+        return 1
 
     dex_files = []
     if dex_list:
@@ -125,7 +142,10 @@ def main():
                 zout.write(path, entry, compress_type=zipfile.ZIP_DEFLATED)
                 added.append(entry)
 
-            for abi in sorted(os.listdir(libdir)):
+            abis = sorted(os.listdir(libdir))
+            if only_abi is not None:
+                abis = [only_abi]
+            for abi in abis:
                 abi_dir = os.path.join(libdir, abi)
                 if not os.path.isdir(abi_dir):
                     continue

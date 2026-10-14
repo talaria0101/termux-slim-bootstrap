@@ -189,8 +189,45 @@ def main():
     abis = sorted({m.group(1) for n in names
                    for m in [re.match(r"lib/([^/]+)/libtermux-bootstrap\.so$", n)]
                    if m})
-    check("native library for both ABIs", abis == ["arm64-v8a", "armeabi-v7a"],
+
+    # The APK must carry exactly the ABIs its filename claims, and no others.
+    #
+    # The build emits one APK per ABI plus a universal one, so a split APK
+    # carrying a single lib/ is correct and a fat APK carrying two is correct.
+    # What is never correct is a mismatch: an arm64-named APK carrying both
+    # ABIs makes the device download the other ABI's 40MB bootstrap for nothing,
+    # which defeats the split, and an arm64-named APK carrying none cannot load
+    # its bootstrap at all.
+    #
+    # The expected set is derived from the filename, so this cannot pass by
+    # agreeing with whatever the build happened to produce.
+    base = os.path.basename(apk)
+    if base.endswith("_arm64-v8a.apk"):
+        expected_abis = ["arm64-v8a"]
+    elif base.endswith("_armeabi-v7a.apk"):
+        expected_abis = ["armeabi-v7a"]
+    elif base.endswith("_x86.apk"):
+        expected_abis = ["x86"]
+    elif base.endswith("_x86_64.apk"):
+        expected_abis = ["x86_64"]
+    elif base.endswith("_universal.apk"):
+        expected_abis = ["arm64-v8a", "armeabi-v7a"]
+    else:
+        expected_abis = None
+
+    check("carries a native library", bool(abis),
           "found " + (", ".join(abis) if abis else "none"))
+    if expected_abis is None:
+        check("native ABIs match the filename", bool(abis),
+              "filename claims no ABI and the APK has " + (", ".join(abis) or "none"))
+    else:
+        check("native ABIs match the filename", abis == expected_abis,
+              "filename says %s, APK has %s"
+              % (", ".join(expected_abis), ", ".join(abis) if abis else "none"))
+    if abis:
+        check("no native library for an unexpected ABI",
+              all(a in expected_abis for a in abis) if expected_abis else True,
+              ", ".join(a for a in abis if not expected_abis or a not in expected_abis))
 
     expect_machine = {"arm64-v8a": 0xB7, "armeabi-v7a": 0x28}
     for abi in abis:

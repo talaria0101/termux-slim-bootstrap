@@ -4,8 +4,21 @@
 ships `gh` and `ssh` instead of the 33MB stock bootstrap. It uses the SDK tools
 directly rather than Gradle.
 
-Output: `apk/termux-app_apt-android-7-debug.apk`, ~86MB, signed with
-termux-app's own debug keystore.
+Output, three APKs, because the bootstrap is 91% of the file and a device only
+ever runs one ABI's copy:
+
+| File | Size |
+| --- | --- |
+| `apk/termux-app_apt-android-7-debug_arm64-v8a.apk` | 48,915,752 |
+| `apk/termux-app_apt-android-7-debug_armeabi-v7a.apk` | 46,589,226 |
+| `apk/termux-app_apt-android-7-debug_universal.apk` | 87,565,692 |
+
+`BUILD_UNIVERSAL=0` skips the fat one. All three are signed with termux-app's
+own debug keystore. Resources do not depend on the ABI, so `aapt2 link` runs
+once and each variant is produced by merging one `lib/<abi>/` into a copy of
+that single result. `app/build.gradle:69-75` already configures this split,
+including `universalApk true`, so producing it is not a departure from
+upstream; what was missing was emitting it.
 
 ## Why not Gradle
 
@@ -160,16 +173,22 @@ file leaves an app that starts no session.
 
 ## Testing
 
-    python3 test-apk.py apk/termux-app_apt-android-7-debug.apk
+    python3 test-apk.py apk/termux-app_apt-android-7-debug_arm64-v8a.apk
     bash test-apk-selfcheck.sh
 
-`test-apk.py` makes 33 structural checks against the built file: signature
+`test-apk.py` makes 29 structural checks against a split APK and 37 against
+the universal one, deriving the expected ABI set from the filename: signature
 scheme, package identity, targetSdk 28, dex contents, `resources.arsc`
 compression, native libraries per ABI, the embedded bootstrap's `gh` and `ssh`
 verified as ELF of the right machine type, and the symlink records.
 
-`test-apk-selfcheck.sh` plants defects and requires each to be caught by the
-specific check meant to catch it. Asserting only a non-zero exit would be
+An ABI mismatch fails in both directions. A split APK carrying both ABIs makes
+the device download the other ABI's 40MB bootstrap for nothing, which defeats
+the split; a split APK carrying none cannot load its bootstrap at all. Both are
+covered, and the self-check plants each.
+
+`test-apk-selfcheck.sh` plants nine defects and requires each to be caught by
+the specific check meant to catch it. Asserting only a non-zero exit would be
 misleading: rewriting an APK obviously breaks its signature, so an exit-code-only
 test passes for the wrong reason and would keep passing if the real check were
 deleted. The `targetSdk` case is rebuilt and re-signed properly for the same

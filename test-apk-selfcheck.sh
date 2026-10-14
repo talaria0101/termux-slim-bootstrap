@@ -19,7 +19,10 @@
 set -uo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-APK="${1:-$HERE/apk/termux-app_apt-android-7-debug.apk}"
+# Defaults to the arm64 split APK, which is what a user on a modern phone
+# installs. The universal APK is exercised separately by test-apk.py's own run;
+# see the split cases below.
+APK="${1:-$HERE/apk/termux-app_apt-android-7-debug_arm64-v8a.apk}"
 PLANTED="$(mktemp -d)"
 trap 'rm -rf "$PLANTED"' EXIT
 
@@ -40,6 +43,14 @@ if [ ! -f "$APK" ]; then
 fi
 
 fails=0
+
+BT="${BUILD_TOOLS:-/workspace/android-sdk/build-tools/36.0.0}"
+GRADLE_APP="${APP_DIR:-/workspace/termux-app}"
+ks_pass="$(sed -n "s/^[[:space:]]*keyPassword[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" \
+	"$GRADLE_APP/app/build.gradle" | tail -1)"
+ks_alias="$(sed -n "s/^[[:space:]]*keyAlias[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" \
+	"$GRADLE_APP/app/build.gradle" | tail -1)"
+WORK="${WORK_DIR:-$HERE/apk-work}"
 
 # expect_catch <label> <planted-apk> <substring that must appear in the failures>
 expect_catch() {
@@ -125,19 +136,53 @@ EOF
 )"
 expect_catch "no classes.dex" "$bad" "has classes.dex"
 
-bad="$(plant no-arm64 <<'EOF'
+bad="$(plant no-lib <<'EOF'
 import sys, zipfile
 src, dst = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(src) as z, zipfile.ZipFile(dst, "w") as o:
     for i in z.infolist():
-        if i.filename.startswith("lib/arm64-v8a/"):
+        if i.filename.startswith("lib/"):
             continue
         zi = zipfile.ZipInfo(i.filename, date_time=i.date_time)
         zi.compress_type = i.compress_type
         o.writestr(zi, z.read(i.filename))
 EOF
 )"
-expect_catch "missing arm64 lib" "$bad" "native library for both ABIs"
+expect_catch "no native library" "$bad" "carries a native library"
+
+# The split is the entire point of the per-ABI APKs, so a split APK carrying the
+# other ABI's bootstrap must fail. This is the regression that would quietly
+# double the download while every other check still passed: the APK installs,
+# gh and ssh are still correct for the right ABI, and the only symptom is an
+# extra 40MB nobody notices.
+#
+# The donor .so comes from the build work directory, which holds both. Without
+# it the case skips rather than passing vacuously.
+#
+# PLANT_LIBDIR must be exported for the plant itself: the plant runs inside a
+# command substitution, so an assignment on the expect_catch line would arrive
+# too late and the python would raise KeyError.
+donor_lib="$WORK/jni/armeabi-v7a/libtermux-bootstrap.so"
+if [ -f "$donor_lib" ]; then
+	export PLANT_LIBDIR="$WORK/jni/armeabi-v7a"
+	bad="$(plant both-abis <<'EOF'
+import sys, zipfile, os
+src, dst = sys.argv[1], sys.argv[2]
+donor = os.path.join(os.environ["PLANT_LIBDIR"], "libtermux-bootstrap.so")
+with zipfile.ZipFile(src) as z, zipfile.ZipFile(dst, "w") as o:
+    for i in z.infolist():
+        zi = zipfile.ZipInfo(i.filename, date_time=i.date_time)
+        zi.compress_type = i.compress_type
+        o.writestr(zi, z.read(i.filename))
+    o.write(donor, "lib/armeabi-v7a/libtermux-bootstrap.so",
+            compress_type=zipfile.ZIP_DEFLATED)
+EOF
+)"
+	expect_catch "both ABIs in split APK" "$bad" "native ABIs match the filename"
+else
+	printf '  SKIP  %-22s %s not built; run build-apk.sh first\n' \
+		"both ABIs in split" "$donor_lib"
+fi
 
 # The defect that would matter most in the field: a bootstrap that installed
 # cleanly but had no gh in it. The zip is rewritten without bin/gh, the .so is
@@ -188,12 +233,6 @@ resign() {
 	mv -f "$signed" "$bad"
 }
 
-BT="${BUILD_TOOLS:-/workspace/android-sdk/build-tools/36.0.0}"
-GRADLE_APP="${APP_DIR:-/workspace/termux-app}"
-ks_pass="$(sed -n "s/^[[:space:]]*keyPassword[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" \
-	"$GRADLE_APP/app/build.gradle" | tail -1)"
-ks_alias="$(sed -n "s/^[[:space:]]*keyAlias[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" \
-	"$GRADLE_APP/app/build.gradle" | tail -1)"
 
 if resign "$bad"; then
 	expect_catch "no gh in bootstrap" "$bad" "has bin/gh"
@@ -218,7 +257,6 @@ TS="${TMPDIR:-/tmp}/termux-selfcheck-targetsdk.$$"
 mkdir -p "$TS"
 trap 'rm -rf "$PLANTED" "$TS" "$NOR"' EXIT
 SDK="${ANDROID_SDK_ROOT:-/workspace/android-sdk}"
-WORK="${WORK_DIR:-$HERE/apk-work}"
 
 if [ -d "$WORK/res" ] && [ -f "$WORK/AndroidManifest.xml" ] && [ -f "$WORK/flats-order.txt" ]; then
 	flats=()

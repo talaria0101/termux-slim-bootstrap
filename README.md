@@ -123,12 +123,24 @@ socket bind, and every bind is denied). See [APK-BUILD.md](APK-BUILD.md) for
 the requirements and for the things that are easy to get wrong, each of which
 cost real time to find.
 
-    bash build-apk.sh                        # -> apk/termux-app_apt-android-7-debug.apk
-    python3 test-apk.py apk/termux-app_apt-android-7-debug.apk
+    bash build-apk.sh
+    python3 test-apk.py apk/termux-app_apt-android-7-debug_arm64-v8a.apk
     bash test-apk-selfcheck.sh
 
-The result is ~86 MB, `com.termux` versionCode 118, minSdk 21, targetSdk 28,
-signed with termux-app's own debug keystore, for arm64-v8a and armeabi-v7a.
+Three APKs, because the bootstrap dominates the size and a device only ever
+runs one of them:
+
+| APK | Size | Device |
+| --- | --- | --- |
+| `..._arm64-v8a.apk` | 48.9 MB | 64-bit ARM, any phone from about 2016 on |
+| `..._armeabi-v7a.apk` | 46.6 MB | 32-bit ARM, older or 32-bit-only devices |
+| `..._universal.apk` | 87.6 MB | both, if you would rather not pick |
+
+All three are `com.termux` versionCode 118, minSdk 21, targetSdk 28, signed
+with termux-app's own debug keystore. `BUILD_UNIVERSAL=0` skips the fat one.
+
+**Installing any of these replaces an existing Termux**, since all three use the
+package name `com.termux`.
 
 **The APK is content-reproducible but not byte-reproducible.** Two builds from
 the same sources have the same entry set and byte-identical content in every
